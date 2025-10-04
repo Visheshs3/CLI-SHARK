@@ -1,6 +1,6 @@
 #ifndef CSHARK_H
 #define CSHARK_H
-
+#define _DEFAULT_SOURCE
 #include <pcap.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 
 #define MAXDEVICES 100;
@@ -29,10 +30,6 @@
 #define PROTOCOL_TCP   4
 #define PROTOCOL_UDP   5
 
-typedef struct sniffer_context{
-    int protocol_option; 
-}sniffer_context;
-
 //data sturucture for arp payload
 struct arp_payload {
     u_char sender_mac[6];
@@ -40,5 +37,18 @@ struct arp_payload {
     u_char target_mac[6];
     u_char target_ip[4];
 };
+
+#define MAX_PACKET_STORAGE 10000
+
+typedef struct StoredPacket{
+    struct pcap_pkthdr header;    // header and data of the packets
+    u_char *data;
+} StoredPacket;
+
+
+typedef struct user_data{
+    char* choice;
+    bool detailed;
+}user_data;
 
 #endif // CSHARK_H
