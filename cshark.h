@@ -23,6 +23,7 @@
 
 #define MAXDEVICES 100;
 
+#define PROTOCOL_NONE -1
 #define PROTOCOL_HTTP  0
 #define PROTOCOL_HTTPS 1
 #define PROTOCOL_DNS   2
@@ -47,6 +48,7 @@ typedef struct StoredPacket{
 
 
 typedef struct user_data{
+    int filter_protocol;
     char* choice;
     bool detailed;
 }user_data;

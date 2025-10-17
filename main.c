@@ -6,6 +6,7 @@
 StoredPacket *g_session_packets[MAX_PACKET_STORAGE];
 int g_session_packet_count = 0;
 const char *session_filename = "cshark_session.bin";
+int g_active_filter = PROTOCOL_NONE;
 
 char device_list[100][100] = {0};
 int fg_process_pid = -1;
@@ -13,7 +14,7 @@ long long int count = 0;
 FILE *g_session_file = NULL;
 
 //stops the fg-process, here the sniffing
-void sigint_handler(int sig) {
+void sigint_handler() {
     if (fg_process_pid != -1) {
         // Send SIGTSTP to the foreground process group
         kill(-fg_process_pid, SIGINT);
@@ -85,10 +86,74 @@ char* select_device(){
 
 
 // checks if the packet follows the filtering condition or not
-bool isvalid(const struct pcap_pkthdr *pkthdr){
-    return true;
-}
+bool isvalid(const u_char *packet, int filter_protocol){
+    if (filter_protocol == PROTOCOL_NONE) {
+        return true; // No filter applied
+    }
 
+    struct ether_header *eth_header = (struct ether_header *)packet;
+    u_short ether_type = ntohs(eth_header->ether_type);
+
+    if (filter_protocol == PROTOCOL_ARP) {
+        return ether_type == ETHERTYPE_ARP;
+    }
+
+    if (ether_type == ETHERTYPE_IP) {
+        const struct ip *ip_header = (const struct ip*)(packet + sizeof(struct ether_header));
+        int ip_header_len = ip_header->ip_hl * 4;
+
+        if (filter_protocol == PROTOCOL_TCP) {
+            return ip_header->ip_p == IPPROTO_TCP;
+        }
+        if (filter_protocol == PROTOCOL_UDP) {
+            return ip_header->ip_p == IPPROTO_UDP;
+        }
+
+        if (ip_header->ip_p == IPPROTO_TCP) {
+            const struct tcphdr *tcp_header = (const struct tcphdr*)(packet + sizeof(struct ether_header) + ip_header_len);
+            u_short src_port = ntohs(tcp_header->th_sport);
+            u_short dst_port = ntohs(tcp_header->th_dport);
+
+            if (filter_protocol == PROTOCOL_HTTP) return (src_port == 80 || dst_port == 80);
+            if (filter_protocol == PROTOCOL_HTTPS) return (src_port == 443 || dst_port == 443);
+
+        } else if (ip_header->ip_p == IPPROTO_UDP) {
+            const struct udphdr *udp_header = (const struct udphdr*)(packet + sizeof(struct ether_header) + ip_header_len);
+            u_short src_port = ntohs(udp_header->uh_sport);
+            u_short dst_port = ntohs(udp_header->uh_dport);
+
+            if (filter_protocol == PROTOCOL_DNS) return (src_port == 53 || dst_port == 53);
+        }
+    } else if (ether_type == ETHERTYPE_IPV6) {
+        const struct ip6_hdr *ipv6_header = (const struct ip6_hdr*)(packet + sizeof(struct ether_header));
+        int l4_offset = sizeof(struct ether_header) + sizeof(struct ip6_hdr);
+
+        if (filter_protocol == PROTOCOL_TCP) {
+            return ipv6_header->ip6_nxt == IPPROTO_TCP;
+        }
+        if (filter_protocol == PROTOCOL_UDP) {
+            return ipv6_header->ip6_nxt == IPPROTO_UDP;
+        }
+
+        if (ipv6_header->ip6_nxt == IPPROTO_TCP) {
+            const struct tcphdr *tcp_header = (const struct tcphdr*)(packet + l4_offset);
+            u_short src_port = ntohs(tcp_header->th_sport);
+            u_short dst_port = ntohs(tcp_header->th_dport);
+
+            if (filter_protocol == PROTOCOL_HTTP) return (src_port == 80 || dst_port == 80);
+            if (filter_protocol == PROTOCOL_HTTPS) return (src_port == 443 || dst_port == 443);
+
+        } else if (ipv6_header->ip6_nxt == IPPROTO_UDP) {
+            const struct udphdr *udp_header = (const struct udphdr*)(packet + l4_offset);
+            u_short src_port = ntohs(udp_header->uh_sport);
+            u_short dst_port = ntohs(udp_header->uh_dport);
+
+            if (filter_protocol == PROTOCOL_DNS) return (src_port == 53 || dst_port == 53);
+        }
+    }
+    
+    return false;
+}
 
 void print_rest(const struct pcap_pkthdr *pkthdr, const u_char *packet, bool detailed){
     struct ether_header *eth_header = (struct ether_header *)packet;
@@ -127,8 +192,11 @@ void print_rest(const struct pcap_pkthdr *pkthdr, const u_char *packet, bool det
 
 
 void packet_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
-
-    if(isvalid(pkthdr)){
+    int filter = g_active_filter;
+    if(user_data != NULL){
+        filter = ((struct user_data*)user_data)->filter_protocol;
+    }
+    if(isvalid(packet, filter)){
         if (g_session_file != NULL && count < MAX_PACKET_STORAGE) {
             fwrite(pkthdr, sizeof(struct pcap_pkthdr), 1, g_session_file);
             fwrite(packet, pkthdr->caplen, 1, g_session_file);
@@ -220,7 +288,7 @@ void inspect_session() {
     }
 
     printf("\n==================================================================Session Summary==================================================================\n");
-    for (int i = 0; i < g_session_packet_count; i++) {
+    for (long long int i = 0; i < g_session_packet_count; i++) {
         char time_buffer[64];
 
         struct pcap_pkthdr *pkthdr = &(g_session_packets[i]->header);
@@ -246,8 +314,8 @@ void inspect_session() {
     printf("===================================================================================================\n");
 
     printf("Enter Packet ID to inspect (1-%d), or 0 to return: ", g_session_packet_count);
-    int packet_id = 0;
-    scanf("%d", &packet_id);
+    long long int packet_id = 0;
+    scanf("%lld", &packet_id);
     if (packet_id > 0 && packet_id <= g_session_packet_count) {
         StoredPacket *selected_pkt = g_session_packets[packet_id - 1];
         struct pcap_pkthdr *pkthdr = &(selected_pkt->header);
@@ -277,7 +345,18 @@ void inspect_session() {
     }
 }
 
-
+//prints the filter menu for the user
+void print_filter_menu(){
+    printf("\n--- Select a Protocol to Filter ---\n");
+    printf("0. HTTP\n");
+    printf("1. HTTPS\n");
+    printf("2. DNS\n");
+    printf("3. ARP\n");
+    printf("4. TCP\n");
+    printf("5. UDP\n");
+    printf("-----------------------------------\n");
+    printf("Enter filter choice: ");
+}
 
 //prints the option menu for user
 void printmenu(){
@@ -326,24 +405,50 @@ int main(void){
             }
             else if(option == 1 || option == 2){
 
+                g_active_filter = PROTOCOL_NONE; // Default to no filter
+                if (option == 2) {
+                    print_filter_menu();
+                    int filter_choice = -1;
+                    if(scanf(" %d", &filter_choice) != 1 || filter_choice < 0 || filter_choice > 5) {
+                        printf("Invalid filter choice. Sniffing all packets instead.\n");
+                        while (getchar() != '\n'); // Clear input buffer
+                    } else {
+                        g_active_filter = filter_choice;
+                    }
+                }
+
                 int child = fork();
-                if (child == 0){
-                    g_session_file = fopen(session_filename, "wb");  // no need to free the file as w frees it automatically
+                if (child < 0) {
+                    perror("fork failed");
+                    break;
+                }
+
+                if (child == 0){ // Child process
+                    g_session_file = fopen(session_filename, "wb");
                     if (g_session_file == NULL) {
                         perror("Failed to open session file");
-                        return 1;
+                        exit(1);
                     }
                     setpgid(0, 0);
                     signal(SIGINT, SIG_DFL);
                     printf("\n[C-Shark] Sniffing on device: %s. Press Ctrl+C to stop.\n", choosen_device);
-                    pcap_loop(packet_sniffer, -1, packet_handler, NULL); 
+                    
+                    user_data data;
+                    data.filter_protocol = g_active_filter;
+
+                    pcap_loop(packet_sniffer, -1, packet_handler, (u_char*)&data); 
+                    
+                    printf("\n[C-Shark] Sniffing stopped. %lld packets captured.\n", count);
                     fclose(g_session_file);
+                    exit(0);
                 }
-                else{
+                else{ 
                     fg_process_pid = child;
-                    setpgid(child, child);
-                    wait(NULL);
+                    setpgid(child, child); // Move child to its own process group
+                    int status;
+                    waitpid(child, &status, 0); 
                     count = 0;
+                    g_session_packet_count = 0; 
                     fg_process_pid = -1;
                 }
             }

@@ -1,6 +1,5 @@
 #ifndef HELPER_H
 #define HELPER_H
-#define _DEFAULT_SOURCE
 #include "cshark.h"
 
 // printing the ethertypr
